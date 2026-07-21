@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Task 5 — Fine-tune a Small LLM for Structured Extraction
 
 Extracts a compact `{"problem": ..., "solution": ...}` JSON pair from a
@@ -144,3 +145,6 @@ python eval.py --mode finetuned --adapter lora-adapter
   values and check whether confidently-produced fields are more/less
   likely to be wrong — `model.generate(..., output_scores=True)` gives you
   what you need; not built here to keep this deliverable focused.
+=======
+# statements-structured-extraction-fine-tuning-
+>>>>>>> 5dd7dfc1a7239e805c518ed8730e374ce385f7c8
