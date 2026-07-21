@@ -1,150 +1,172 @@
-<<<<<<< HEAD
-# Task 5 — Fine-tune a Small LLM for Structured Extraction
+# Structured Extraction Fine-Tuning — Qwen2.5-0.5B-Instruct
 
-Extracts a compact `{"problem": ..., "solution": ...}` JSON pair from a
-paragraph describing one grassroots innovation (Honey Bee Network / NIF
-style stories). See `SOURCES.md` for exactly where the data came from and
-what's verified vs auto-generated.
+Fine-tunes a small instruction-tuned LLM to extract a compact
+`{"problem": ..., "solution": ...}` JSON pair from a paragraph describing
+one grassroots innovation (in the style of Honey Bee Network / NIF stories).
 
-## What's here
+> **Status:** scripts are complete and ready to run, but have **not yet been
+> executed** (built in a sandboxed, GPU-less, network-less environment).
+> `results.md` is an honest template — see [Honest Disclosures](#honest-disclosures).
 
-```
-data/train.jsonl   414 rows / 103 unique stories
-data/val.jsonl      52 rows /  13 unique stories
-data/test.jsonl     52 rows /  13 unique stories
-build_dataset.py    generates the above from 129 sourced cases (rerun-able, seeded)
-prompts.py          shared prompt template used by train.py and eval.py
-train.py            LoRA fine-tuning script (HF Trainer + PEFT)
-eval.py             baseline vs fine-tuned evaluation on test split
-results.md          metrics table template + qualitative examples (fill in after a real run)
-SOURCES.md          per-case source URLs + honesty flags
-```
+---
 
-**Important — read this first:** this was built in a sandboxed environment
-with no GPU and no network access, so `train.py` and `eval.py` are complete,
-correct, ready-to-run scripts, but they have **not actually been executed**
-here. `results.md` is an honest template, not filled-in numbers. Run the two
-scripts on a free Colab/Kaggle T4 (instructions below) and drop your
-numbers into `results.md`.
+## Table of Contents
 
-## Model choice: Qwen2.5-0.5B-Instruct
+- [Repository Layout](#repository-layout)
+- [Quick Start](#quick-start)
+- [Model Choice](#model-choice)
+- [LoRA Configuration](#lora-configuration)
+- [Cost & Time Estimate](#cost--time-estimate)
+- [JSON Parsing & Failure Handling](#json-parsing--failure-handling)
+- [Honest Disclosures](#honest-disclosures)
+- [Stretch Ideas](#stretch-ideas)
 
-| Option | Why not |
+---
+
+## Repository Layout
+
+| Path | Description |
 |---|---|
-| GPT-4o / Claude API | Works great but the whole point of this exercise is to *not* pay per-token API cost at thousands-of-records scale |
-| Llama-3.2-1B-Instruct | Also a fine choice — this script works for it unchanged if you swap `MODEL_NAME` in `train.py`/`eval.py`; picked Qwen2.5-0.5B instead because it's smaller (cheaper/faster at inference, the actual production goal) and its instruction-tuned checkpoint follows a "reply with only this JSON" instruction noticeably more reliably at zero-shot than Llama-3.2-1B in informal testing reported by others |
-| Qwen2.5-1.5B-Instruct | Better raw quality, but ~3x the inference cost per record for a task this narrow (2-field extraction) — not worth it unless the 0.5B model's fine-tuned quality turns out too low |
+| `data/train.jsonl` | 414 rows / 103 unique stories |
+| `data/val.jsonl` | 52 rows / 13 unique stories |
+| `data/test.jsonl` | 52 rows / 13 unique stories |
+| `build_dataset.py` | Generates the splits above from 129 sourced cases (rerun-able, seeded) |
+| `prompts.py` | Shared prompt template used by `train.py` and `eval.py` |
+| `train.py` | LoRA fine-tuning script (HF Trainer + PEFT) |
+| `eval.py` | Baseline vs. fine-tuned evaluation on the test split |
+| `results.md` | Metrics table template + qualitative examples (fill in after a real run) |
+| `SOURCES.md` | Per-case source URLs and honesty flags |
 
-0.5B parameters means: a full LoRA fine-tune fits on a free T4 without
-4-bit quantization, and inference is cheap enough that "thousands of
-records" is a non-issue on a single CPU or small GPU instance — which is
-the actual business case in the prompt.
+---
 
-## LoRA config — r=16, alpha=32, dropout=0.05, all 7 linear projections
+## Quick Start
+
+```bash
+pip install -U transformers peft accelerate bitsandbytes datasets rouge-score --break-system-packages
+```
+
+```bash
+# 1. (optional) regenerate the dataset — already committed, but this is
+#    how it was built, and it's fully reproducible (seeded)
+python build_dataset.py
+
+# 2. Zero-shot baseline
+python eval.py --mode baseline
+
+# 3. Fine-tune (writes lora-adapter/)
+python train.py
+
+# 4. Evaluate the fine-tuned model
+python eval.py --mode finetuned --adapter lora-adapter
+
+# 5. Fill in results.md with the two summaries + 3 qualitative rows
+```
+
+---
+
+## Model Choice
+
+**Qwen2.5-0.5B-Instruct**
+
+| Option | Verdict |
+|---|---|
+| GPT-4o / Claude API | Great quality, but defeats the point of avoiding per-token API cost at thousands-of-records scale |
+| **Qwen2.5-0.5B-Instruct** ✅ | Cheap, fast inference (the actual production goal); its instruct checkpoint follows a "reply with only this JSON" instruction more reliably zero-shot than Llama-3.2-1B in informal reports |
+| Llama-3.2-1B-Instruct | Valid alternative — `train.py`/`eval.py` work unchanged if you swap `MODEL_NAME` |
+| Qwen2.5-1.5B-Instruct | Better raw quality, but ~3x inference cost for a narrow 2-field extraction task — only worth it if the 0.5B fine-tune underperforms |
+
+At 0.5B parameters, a full LoRA fine-tune fits on a free T4 without 4-bit
+quantization, and inference is cheap enough to comfortably support
+thousands of records on a single CPU or small GPU instance.
+
+---
+
+## LoRA Configuration
 
 ```python
 LoraConfig(
     r=16, lora_alpha=32, lora_dropout=0.05,
-    target_modules=["q_proj","k_proj","v_proj","o_proj",
-                     "gate_proj","up_proj","down_proj"],
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                     "gate_proj", "up_proj", "down_proj"],
     bias="none", task_type=TaskType.CAUSAL_LM,
 )
 ```
 
-**Why rank 16, not 8:** the model isn't just adapting to a topic, it's
-learning a *strict output grammar* (single-line JSON, exactly two keys) it
-doesn't reliably produce zero-shot, plus new domain vocabulary
-(groundnut decorticator, biomass gasifier, etc.). That's more to encode
-than typical style-adaptation LoRA use cases where r=8 is standard. r=32
-was also considered — rejected because with 414 training rows still being
-a modest dataset, a larger adapter increases overfitting risk for no
-expected gain; r=16 is the smaller of the two "safe" options for a model
-this size.
+**Why r=16, not r=8:** the model isn't just adapting to a topic — it's
+learning a strict output grammar (single-line JSON, exactly two keys) it
+doesn't reliably produce zero-shot, plus new domain vocabulary (e.g.
+*groundnut decorticator*, *biomass gasifier*). That's more to encode than
+typical style-adaptation LoRA use cases where r=8 is standard.
 
-**Why not just q_proj/v_proj (the classic 7B-model default):** on a
-0.5B model, restricting LoRA to attention-only sees the MLP layers
-(gate/up/down_proj) never adapt — but MLP blocks are where a lot of format
-and vocabulary knowledge lives in transformer models. Since the target
+**Why not r=32:** with 414 training rows still a modest dataset, a larger
+adapter raises overfitting risk with no expected gain — r=16 is the
+smaller of the two "safe" options for a model this size.
+
+**Why all 7 linear projections, not just q_proj/v_proj:** restricting LoRA
+to attention-only (the classic default for 7B models) leaves the MLP
+layers (`gate_proj`/`up_proj`/`down_proj`) unadapted — but MLP blocks carry
+much of a transformer's format and vocabulary knowledge. Since the target
 behavior change here includes format compliance, not just phrasing style,
-all 7 linear projection types are targeted. This is still a small adapter
-in absolute terms — well under 1% of the base model's parameters.
+all 7 projection types are targeted. This is still a small adapter overall
+— well under 1% of the base model's parameters.
 
-**Alpha = 2x rank** is the standard rule of thumb (keeps the effective
-LoRA scaling factor ⍺/r = 2 regardless of rank, a good default absent a
-reason to deviate).
+**Alpha = 2× rank** is the standard rule of thumb, keeping the effective
+LoRA scaling factor (α/r = 2) constant regardless of rank.
 
-## GPU hours / cost — estimate, not measured
+---
 
-Not measured in this session (no GPU available here). Estimate for
-reference, to be replaced with real numbers after running on Colab:
+## Cost & Time Estimate
 
-- 414 training rows, 6 epochs, effective batch size 8 → ~310 optimizer
-  steps total.
-- A 0.5B-parameter LoRA fine-tune at this data size typically takes
-  **10-20 minutes** on a free T4, based on published throughput figures for
-  similarly-sized LoRA runs.
-- Free-tier Colab/Kaggle T4 → **$0 marginal cost** if you stay within free
-  quota; if run on a paid on-demand T4 (~$0.35-0.60/hr on common clouds),
-  a 15-minute run is well under $0.20.
+> Estimated, not measured — no GPU was available in this sandbox.
 
-Replace this section with the real wall-clock time and (if applicable)
-actual billed cost once you've run `train.py`.
+- 414 training rows, 6 epochs, effective batch size 8 → ~310 optimizer steps total.
+- A 0.5B-parameter LoRA fine-tune at this data size typically takes **10–20 minutes** on a free T4, based on published throughput figures for similarly-sized runs.
+- **$0 marginal cost** on free-tier Colab/Kaggle; on a paid on-demand T4 (~$0.35–0.60/hr on common clouds), a 15-minute run is well under $0.20.
 
-## JSON parse rate — how failures are handled
+Replace this section with the real wall-clock time and billed cost once `train.py` has actually been run.
 
-Small base models frequently wrap JSON in markdown fences, add a leading
-sentence, use smart quotes, or leave a trailing comma. `eval.py`'s
-`extract_json()` tries, in order: direct `json.loads`, then a regex pull
-of the first `{...}` span, then a small set of common repairs (strip code
-fences, normalize smart quotes, drop trailing commas) before giving up.
-The **parse rate is reported as its own metric**, separately from ROUGE-L
-— see `results.md` and the docstring in `eval.py` for why we don't fold
-parse failures into the text-similarity score.
+---
 
-## How to actually run this
+## JSON Parsing & Failure Handling
 
-```bash
-pip install -U transformers peft accelerate bitsandbytes datasets rouge-score --break-system-packages
+Small base models frequently wrap JSON in markdown fences, prepend a
+leading sentence, use smart quotes, or leave a trailing comma. `eval.py`'s
+`extract_json()` handles this in order:
 
-# 1. (optional) regenerate the dataset — it's already committed, but this
-#    is how it was built and is fully reproducible (seeded):
-python build_dataset.py
+1. Direct `json.loads`
+2. Regex pull of the first `{...}` span
+3. A small set of common repairs (strip code fences, normalize smart quotes, drop trailing commas)
 
-# 2. zero-shot baseline
-python eval.py --mode baseline
+**Parse rate is reported as its own metric**, separate from ROUGE-L — see
+`results.md` and the `eval.py` docstring for why parse failures aren't
+folded into the text-similarity score.
 
-# 3. fine-tune (writes lora-adapter/)
-python train.py
+---
 
-# 4. evaluate the fine-tuned model
-python eval.py --mode finetuned --adapter lora-adapter
+## Honest Disclosures
 
-# 5. fill in results.md with the two summaries + 3 qualitative rows
-```
-
-## Honest disclosures (please read)
-
-- The dataset's `problem`/`solution` labels were written by Claude from
-  sourced facts, not hand-verified by a second human reviewer — see
-  `SOURCES.md` for the full disclosure and per-case source list.
-- 518 rows come from only **129 independently-sourced real stories** (each
-  expanded into 4-5 paraphrased variants, split by story so no story
+- `problem`/`solution` labels were written by Claude from sourced facts,
+  not hand-verified by a second human reviewer — see `SOURCES.md` for the
+  full disclosure and per-case source list.
+- 518 total rows come from only **129 independently-sourced real stories**
+  (each expanded into 4–5 paraphrased variants, split by story so no story
   crosses train/val/test). This is disclosed, not hidden — see
-  `SOURCES.md` for why, and for how to extend it toward more independent
-  stories if you need a larger, more robust benchmark.
-- No metrics in this repo are fabricated. `results.md` is a template
+  `SOURCES.md` for the rationale and how to extend toward more independent
+  stories for a larger, more robust benchmark.
+- **No metrics in this repo are fabricated.** `results.md` is a template
   precisely because this sandbox can't run a GPU model — filling it with
   invented numbers would be worse than leaving it blank.
 
-## Stretch ideas (not implemented here)
+---
 
-- Compare against few-shot prompting of a larger API model (e.g. Claude
-  Haiku) for a cost-vs-quality curve — `prompts.py`'s template can be
-  reused directly, just swap in 2-3 worked examples before the paragraph.
-- Calibration analysis: log the model's per-token logprobs for the JSON
-  values and check whether confidently-produced fields are more/less
-  likely to be wrong — `model.generate(..., output_scores=True)` gives you
-  what you need; not built here to keep this deliverable focused.
-=======
-# statements-structured-extraction-fine-tuning-
->>>>>>> 5dd7dfc1a7239e805c518ed8730e374ce385f7c8
+## Stretch Ideas
+
+*(not implemented here)*
+
+- **Cost-vs-quality curve:** compare against few-shot prompting of a
+  larger API model (e.g. Claude Haiku) — `prompts.py`'s template can be
+  reused directly, just add 2–3 worked examples before the paragraph.
+- **Calibration analysis:** log per-token logprobs for the JSON values and
+  check whether confidently-produced fields are more or less likely to be
+  wrong — `model.generate(..., output_scores=True)` provides what's
+  needed; not built here to keep this deliverable focused.
